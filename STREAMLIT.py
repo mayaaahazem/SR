@@ -1,105 +1,106 @@
 import os
 import tempfile
 import streamlit as st
-import soundfile as sf
-
-from predict_saved_file import predict_emotion
-
 import numpy as np
 import librosa
+import soundfile as sf
+import joblib
 from tensorflow.keras.models import load_model
-import pickle
 
-SPEAKER_MODEL_PATH = "models/speaker_identifier_model.h5"
+# ===============================
+# Paths (same as CLI)
+# ===============================
+MODEL_PATH = "models/speaker_identifier_model.h5"
 ENCODER_PATH = "models/speaker_identifier_encoder.pkl"
+
+# ===============================
+# Audio parameters (MUST match training)
+# ===============================
 SAMPLE_RATE = 22050
 DURATION = 3
 N_MFCC = 40
+MAX_LEN = 130
 
+# ===============================
+# Load model and encoder (once)
+# ===============================
+@st.cache_resource
+def load_speaker_model():
+    model = load_model(MODEL_PATH)
+    encoder = joblib.load(ENCODER_PATH)
+    return model, encoder
 
+model, encoder = load_speaker_model()
+
+# ===============================
+# Feature extraction (MATCHES CLI)
+# ===============================
+def extract_mfcc(file_path):
+    y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
+
+    target_len = SAMPLE_RATE * DURATION
+    if len(y) > target_len:
+        y = y[:target_len]
+    else:
+        y = librosa.util.fix_length(y, size=target_len)
+
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC).T
+
+    if mfcc.shape[0] < MAX_LEN:
+        mfcc = np.pad(mfcc, ((0, MAX_LEN - mfcc.shape[0]), (0, 0)))
+    else:
+        mfcc = mfcc[:MAX_LEN]
+
+    return mfcc
+
+# ===============================
+# Predict speaker
+# ===============================
 def predict_speaker(file_path):
-	if not os.path.exists(SPEAKER_MODEL_PATH) or not os.path.exists(ENCODER_PATH):
-		raise FileNotFoundError("Speaker model or encoder not found. Train the speaker model first and place files in `models/`.")
+    mfcc = extract_mfcc(file_path)
+    mfcc = np.expand_dims(mfcc, axis=0)
 
-	model = load_model(SPEAKER_MODEL_PATH)
-	with open(ENCODER_PATH, "rb") as f:
-		le = pickle.load(f)
+    probs = model.predict(mfcc, verbose=0)
+    idx = np.argmax(probs)
+    confidence = float(probs[0][idx])
 
-	# Load audio and ensure fixed duration
-	y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
-	target_length = SAMPLE_RATE * DURATION
-	if len(y) > target_length:
-		y = y[:target_length]
-	else:
-		y = librosa.util.fix_length(y, size=target_length)
+    raw_label = encoder.inverse_transform([idx])[0]
+    speaker = f"Actor {int(raw_label)}"   # ✔ Actor 8 not 08
 
-	mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC)
-	delta = librosa.feature.delta(mfcc)
-	delta2 = librosa.feature.delta(mfcc, order=2)
-	features = np.concatenate([mfcc, delta, delta2], axis=0).T
+    return speaker, confidence
 
-	# pad or trim to model expected input length
-	max_len = model.input_shape[1]
-	if features.shape[0] < max_len:
-		features = np.pad(features, ((0, max_len - features.shape[0]), (0, 0)), mode='constant')
-	else:
-		features = features[:max_len, :]
+# ===============================
+# Save uploaded file
+# ===============================
+def save_uploaded_file(uploaded_file):
+    suffix = os.path.splitext(uploaded_file.name)[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        return tmp.name
 
-	X = np.expand_dims(features, axis=0)
-	preds = model.predict(X, verbose=0)[0]
-	pred_idx = int(np.argmax(preds))
-	confidence = float(preds[pred_idx])
-	speaker_name = le.classes_[pred_idx]
+# ===============================
+# Streamlit UI
+# ===============================
+st.title("🎙 Speaker Identification System")
+st.markdown("Upload a speech audio file to identify the speaker.")
 
-	return speaker_name, confidence
+uploaded = st.file_uploader("Upload WAV file", type=["wav"])
 
+if uploaded is not None:
+    temp_audio = save_uploaded_file(uploaded)
 
-def save_uploaded_file(uploaded) -> str:
-	suffix = os.path.splitext(uploaded.name)[1]
-	with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-		tmp.write(uploaded.getbuffer())
-		return tmp.name
+    st.audio(temp_audio)
 
+    if st.button("Identify Speaker"):
+        with st.spinner("Analyzing speaker..."):
+            try:
+                speaker, confidence = predict_speaker(temp_audio)
+                st.success("🎯 Prediction Result")
+                st.markdown(f"**Speaker:** {speaker}")
+                st.markdown(f"**Confidence:** {confidence:.2f}")
+            except Exception as e:
+                st.error(f"Speaker prediction failed: {e}")
 
-def main():
-	st.title("Audio Emotion & Speaker Inference")
-
-	st.markdown("Upload a WAV file and choose whether to run emotion or speaker prediction.")
-
-	uploaded = st.file_uploader("Upload audio file", type=["wav", "mp3", "m4a"])
-
-	if uploaded is not None:
-		tmp_path = save_uploaded_file(uploaded)
-		try:
-			st.audio(tmp_path)
-		except Exception:
-			st.write("(Unable to play audio preview in this environment)")
-
-		col1, col2 = st.columns(2)
-
-		with col1:
-			if st.button("Predict Emotion"):
-				try:
-					emotion, conf = predict_emotion(tmp_path)
-					st.success(f"Emotion: {emotion} (confidence: {conf:.2f})")
-				except Exception as e:
-					st.error(f"Emotion prediction failed: {e}")
-
-		with col2:
-			if st.button("Predict Speaker"):
-				try:
-					speaker, conf = predict_speaker(tmp_path)
-					st.success(f"Speaker: {speaker} (confidence: {conf:.2f})")
-				except FileNotFoundError as e:
-					st.warning(str(e))
-				except Exception as e:
-					st.error(f"Speaker prediction failed: {e}")
-
-	st.markdown("---")
-	st.markdown("**Notes:** Make sure the models are available in the `models/` folder: `emotion_model.h5`, `speaker_identifier_model.h5`, and the speaker encoder pickle file.")
-
-
-if __name__ == "__main__":
-	main()
-
+st.markdown("---")
+st.caption("Model: CNN-based Speaker Identifier | Dataset: RAVDESS")
 
