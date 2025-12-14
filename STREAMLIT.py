@@ -10,8 +10,8 @@ import librosa
 from tensorflow.keras.models import load_model
 import pickle
 
-SPEAKER_MODEL_PATH = "speaker_identifier_model.h5"
-ENCODER_PATH = "speaker_identifier_encoder.pkl"
+SPEAKER_MODEL_PATH = "models/speaker_identifier_model.h5"
+ENCODER_PATH = "models/speaker_identifier_encoder.pkl"
 SAMPLE_RATE = 22050
 DURATION = 3
 N_MFCC = 40
@@ -101,4 +101,5 @@ def main():
 
 if __name__ == "__main__":
 	main()
+
 
